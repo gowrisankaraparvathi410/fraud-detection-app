@@ -10,3 +10,4 @@ pdf2image
 reportlab
 tensorflow>=2.16.0
 keras>=2.16.0
+

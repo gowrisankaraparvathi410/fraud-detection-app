@@ -1,138 +1,291 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
+from PIL import Image
 import cv2
 from skimage.metrics import structural_similarity as ssim
-from PIL import Image
 import easyocr
 from deepface import DeepFace
-from io import BytesIO
 from pdf2image import convert_from_bytes
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
+import tempfile, os, re, datetime
 
-# --- THEME, HEADER, SIDEBAR COLORS ---
-st.set_page_config(
-    page_title="Next-Gen Banking Fraud Guard",
-    page_icon="🏦",
-    layout="centered"
+# ---------------------------
+# Page config
+# ---------------------------
+st.set_page_config(page_title="Banking Fraud Guard", page_icon="🏦", layout="wide")
+
+# ---------------------------
+# Load external CSS file
+# ---------------------------
+def local_css(file_name: str):
+    try:
+        with open(file_name, "r", encoding="utf-8") as f:
+            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    except FileNotFoundError:
+        st.warning(f"⚠️ CSS file '{file_name}' not found. Continuing without styling.")
+
+local_css("style.css")
+
+# ---------------------------
+# Header
+# ---------------------------
+st.markdown(
+    """
+    <div class="main-header">
+        <h1>🏦  Fraud Detector </h1>
+        <div>Digital Document, KYC & Transaction Validation System</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
-st.markdown("""
-    <style>
-    /* Sidebar styling: light background, blue text */
-    [data-testid="stSidebar"] {
-        background-color: #f6f8fa !important;
-    }
-    [data-testid="stSidebar"] * {
-        color: #19529a !important;
-    }
-    [data-testid="stSidebar"] .css-1oe5cao,
-    [data-testid="stSidebar"] .css-1v3fvcr {
-        color: #134074 !important;
-        font-weight: 600;
-    }
-    .stApp {background-color: #f8fbff;}
-    .st-bh {color: #074478;}
-    .stButton>button {background:#1c3977;color:white;border-radius:8px;}
-    </style>
-    """, unsafe_allow_html=True)
 
-st.title("🏦 Next-Gen Banking Fraud Guard")
-st.caption("Digital Document, KYC & Transaction Validation System")
+# ---------------------------
+# Helper functions
+# ---------------------------
+def load_image(uploaded_file):
+    if uploaded_file is None:
+        return None
+    name = uploaded_file.name.lower()
+    if name.endswith(".pdf"):
+        pages = convert_from_bytes(uploaded_file.read())
+        return pages[0]
+    else:
+        return Image.open(uploaded_file)
 
-tab_labels = [
-    "Doc Forgery", "Signature Check", "Aadhaar", "PAN", "KYC FaceMatch", "Unusual Txns"
-]
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(tab_labels)
+def generate_report_pdf(output_path: str, data: dict):
+    c = canvas.Canvas(output_path, pagesize=A4)
+    w, h = A4
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(20*mm, h - 20*mm, "Banking Fraud Guard - Fraud Detection Report")
+    c.setFont("Helvetica", 10)
+    c.drawString(20*mm, h - 26*mm, f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if data.get("customer_name"):
+        c.drawString(20*mm, h - 32*mm, f"Customer: {data['customer_name']}")
+    if data.get("reference"):
+        c.drawString(20*mm, h - 38*mm, f"Ref: {data['reference']}")
 
-reader = easyocr.Reader(['en'], gpu=False)
-
-# ====== DOCUMENT FORGERY MODULE ======
-with tab1:
-    st.header("Document Forgery Checker")
-    ft = st.radio("Document type:", ["Image","PDF"], horizontal=True)
-    colA, colB = st.columns(2)
-    with colA:
-        origin = st.file_uploader("Original",type=['png','jpg','jpeg','pdf'],key='origdoc')
-    with colB:
-        test = st.file_uploader("To Verify",type=['png','jpg','jpeg','pdf'],key='testdoc')
-
-    def to_image(file,ftype):
-        if ftype=="PDF":
-            pages = convert_from_bytes(file.read())
-            return np.array(pages[0])
+    y = h - 48*mm
+    for title, val in [
+        ("Document Forgery", data.get("forgery_score")),
+        ("Signature Verification", data.get("signature_score")),
+        ("Aadhaar OCR", data.get("aadhaar_text")),
+        ("PAN OCR", data.get("pan_text")),
+        ("KYC Face Match", data.get("face_distance")),
+        ("Transaction Summary", data.get("transaction_frauds_count")),
+    ]:
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(20*mm, y, title)
+        y -= 6*mm
+        c.setFont("Helvetica", 10)
+        if val is None:
+            c.drawString(20*mm, y, "Not analyzed")
+        elif isinstance(val, str):
+            c.drawString(20*mm, y, val[:200].replace("\n", " ") + "...")
         else:
-            return cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
+            c.drawString(20*mm, y, f"{val}")
+        y -= 8*mm
 
-    if origin and test:
-        img1 = to_image(origin,ft) if ft=="PDF" else cv2.imdecode(np.frombuffer(origin.read(), np.uint8), cv2.IMREAD_COLOR)
-        img2 = to_image(test,ft) if ft=="PDF" else cv2.imdecode(np.frombuffer(test.read(), np.uint8), cv2.IMREAD_COLOR)
-        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
-        g1, g2 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY), cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-        score, diff = ssim(g1,g2, full=True)
-        st.write(f"*Structural similarity:* {score:.3f}")
-        st.image((diff*255).astype(np.uint8), caption="Difference Map")
-        st.warning("Significant difference detected!" if score < 0.87 else "No significant difference.")
+    remarks = data.get("remarks", "None")
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(20*mm, y, "Remarks")
+    y -= 6*mm
+    c.setFont("Helvetica", 10)
+    for line in (remarks[i:i+90] for i in range(0, len(remarks), 90)):
+        c.drawString(20*mm, y, line)
+        y -= 6*mm
 
-# ====== SIGNATURE MATCHING ======
-with tab2:
-    st.header("Signature Verification")
-    sigA = st.file_uploader("Reference Signature",type=['png','jpg','jpeg'],key="sig1")
-    sigB = st.file_uploader("To Verify",type=['png','jpg','jpeg'],key="sig2")
-    if sigA and sigB:
-        imgA = cv2.imdecode(np.frombuffer(sigA.read(), np.uint8), cv2.IMREAD_GRAYSCALE)
-        imgB = cv2.imdecode(np.frombuffer(sigB.read(), np.uint8), cv2.IMREAD_GRAYSCALE)
-        orb = cv2.ORB_create()
-        kp1, des1 = orb.detectAndCompute(imgA, None)
-        kp2, des2 = orb.detectAndCompute(imgB, None)
-        if des1 is not None and des2 is not None:
-            bf = cv2.BFMatcher_create(cv2.NORM_HAMMING, crossCheck=True)
-            matches = bf.match(des1, des2)
-            st.write(f"Feature matches: {len(matches)}")
-            st.success("Matched (Likely True Signature)" if len(matches) > 45 else "Likely Forged")
+    c.showPage()
+    c.save()
+
+# ---------------------------
+# Initialize session
+# ---------------------------
+for key in [
+    "forgery_score",
+    "signature_score",
+    "aadhaar_text",
+    "pan_text",
+    "face_distance",
+    "face_verified",
+    "transaction_frauds_count",
+]:
+    if key not in st.session_state:
+        st.session_state[key] = None
+
+# ---------------------------
+# Tabs
+# ---------------------------
+tabs = st.tabs(["📄 Doc Forgery", "✍️ Signature", "🪪 Aadhaar", "🧾 PAN", "👥 KYC Match", "💸 Transactions"])
+
+# ---- DOC FORGERY ----
+with tabs[0]:
+    st.header("📄 Document Forgery Detection")
+    c1, c2 = st.columns(2)
+    with c1:
+        orig = st.file_uploader("Upload Original Document", type=["jpg","jpeg","png","pdf"], key="orig")
+    with c2:
+        sus = st.file_uploader("Upload Suspect Document", type=["jpg","jpeg","png","pdf"], key="sus")
+
+    if st.button("Analyze for Forgery"):
+        if not (orig and sus):
+            st.error("Please upload both files.")
         else:
-            st.warning("Cannot extract enough features.")
+            pil1 = load_image(orig).convert("L").resize((600,600))
+            pil2 = load_image(sus).convert("L").resize((600,600))
+            a1, a2 = np.array(pil1), np.array(pil2)
+            score, diff = ssim(a1, a2, full=True)
+            st.session_state.forgery_score = float(score)
+            diff_img = (diff * 255).astype("uint8")
+            st.write(f"Similarity Score: {score:.3f}")
+            if score > 0.9:
+                st.success("No forgery detected.")
+            elif score > 0.6:
+                st.warning("Minor differences detected.")
+            else:
+                st.error("High chance of forgery.")
+            st.image([pil1, pil2, diff_img], caption=["Original","Suspect","Diff Map"], width=250)
 
-# ====== AADHAAR MODULE ======
-with tab3:
-    st.header("Aadhaar Verifier")
-    anu = st.text_input("Aadhaar Number (XXXX-XXXX-XXXX)")
-    if st.button("Check Aadhaar", key="aadhaarcheck"):
-        valid = (len(anu) == 14 and all(x.isdigit() or x=='-' for x in anu.replace("-","")))
-        st.success("Format valid." if valid else "Wrong format.")
+# ---- SIGNATURE ----
+with tabs[1]:
+    st.header("✍️ Signature Verification")
+    s1, s2 = st.columns(2)
+    with s1:
+        sig_orig = st.file_uploader("Original Signature", type=["jpg","jpeg","png"], key="sorig")
+    with s2:
+        sig_sus = st.file_uploader("Suspect Signature", type=["jpg","jpeg","png"], key="ssus")
 
-# ====== PAN MODULE ======
-with tab4:
-    st.header("PAN Validator")
-    pnu = st.text_input("PAN Number (ABCDE1234F)")
-    if st.button("Check PAN",key="pancheck"):
-        valid = (len(pnu)==10 and pnu[:5].isalpha() and pnu[5:9].isdigit() and pnu[-1].isalpha())
-        st.success("Format valid." if valid else "Wrong format.")
+    if st.button("Verify Signature"):
+        if not (sig_orig and sig_sus):
+            st.error("Upload both signatures.")
+        else:
+            p1 = load_image(sig_orig).convert("L").resize((300,300))
+            p2 = load_image(sig_sus).convert("L").resize((300,300))
+            sscore, _ = ssim(np.array(p1), np.array(p2), full=True)
+            st.session_state.signature_score = float(sscore)
+            st.write(f"Signature Similarity: {sscore:.3f}")
+            if sscore > 0.85:
+                st.success("Signatures appear genuine.")
+            elif sscore > 0.6:
+                st.warning("Partial match - suspicious.")
+            else:
+                st.error("Signatures likely forged.")
+            st.image([p1, p2], caption=["Original Sig","Suspect Sig"], width=200)
 
-# ====== AI KYC FACEMATCH ======
-with tab5:
-    st.header("AI-based KYC Face Verification")
-    colx, coly = st.columns(2)
-    photo = colx.file_uploader("Upload Selfie",type=['png','jpg','jpeg'],key="kycself")
-    idpic = coly.file_uploader("Upload ID Headshot",type=['png','jpg','jpeg'],key="kycid")
-    if photo and idpic:
-        try:
-            res = DeepFace.verify(np.array(Image.open(photo)), np.array(Image.open(idpic)), enforce_detection=False)
-            st.write(f"Distance: {res['distance']:.3f}")
-            st.success("Faces Match!" if res["verified"] else "Face mismatch detected.")
-        except Exception as ex:
-            st.error(f"Facial verification failed: {ex}")
+# ---- AADHAAR ----
+with tabs[2]:
+    st.header("🪪 Aadhaar OCR & Validation")
+    aad = st.file_uploader("Upload Aadhaar (front) image/pdf", type=["jpg","jpeg","png","pdf"], key="aad")
+    if st.button("Extract Aadhaar"):
+        if not aad:
+            st.error("Upload Aadhaar file.")
+        else:
+            reader = easyocr.Reader(["en"])
+            pil = load_image(aad).convert("RGB")
+            res = reader.readtext(np.array(pil))
+            text = " ".join([r[1] for r in res])
+            st.session_state.aadhaar_text = text
+            st.text_area("Extracted Text", text, height=220)
+            found = re.findall(r"\d{4}\s*\d{4}\s*\d{4}|\d{12}", text)
+            if found:
+                st.success(f"Aadhaar-like number found: {found[0]}")
+            else:
+                st.warning("No 12-digit Aadhaar number detected.")
 
-# ====== ANOMALOUS TRANSACTION DETECTION ======
-with tab6:
-    st.header("Analyze Transaction Unusual Patterns")
-    tfile = st.file_uploader("Upload Transaction CSV", type="csv")
-    if tfile:
-        df = pd.read_csv(tfile)
-        st.dataframe(df.head(10))
-        zscores = ((df.select_dtypes('number')-df.select_dtypes('number').mean())/df.select_dtypes('number').std()).abs()
-        anomalies = df[zscores>3].dropna(how='all')
-        st.subheader("Rows with High Z-score")
-        st.dataframe(anomalies)
+# ---- PAN ----
+with tabs[3]:
+    st.header("🧾 PAN OCR & Validation")
+    pan = st.file_uploader("Upload PAN card image/pdf", type=["jpg","jpeg","png","pdf"], key="pan")
+    if st.button("Extract PAN"):
+        if not pan:
+            st.error("Upload PAN file.")
+        else:
+            reader_pan = easyocr.Reader(["en"])
+            pilp = load_image(pan).convert("RGB")
+            res = reader_pan.readtext(np.array(pilp))
+            textp = " ".join([r[1] for r in res])
+            st.session_state.pan_text = textp
+            st.text_area("Extracted Text", textp, height=220)
+            found = re.findall(r"[A-Z]{5}[0-9]{4}[A-Z]", textp.upper())
+            if found:
+                st.success(f"PAN-like number found: {found[0]}")
+            else:
+                st.warning("PAN number not confidently detected.")
 
-st.divider()
-if st.button("Download Current Report as PDF"):
-    st.info("Report module in beta. (Demo—extend as needed!)")
+# ---- KYC ----
+with tabs[4]:
+    st.header("👥 KYC Face Match")
+    f1, f2 = st.columns(2)
+    with f1:
+        id_face = st.file_uploader("ID Photo (from doc)", type=["jpg","jpeg","png"], key="idface")
+    with f2:
+        live_face = st.file_uploader("Live Photo", type=["jpg","jpeg","png"], key="liveface")
+    if st.button("Compare Faces"):
+        if not (id_face and live_face):
+            st.error("Please upload both ID and live photos.")
+        else:
+            try:
+                res = DeepFace.verify(np.array(load_image(id_face)), np.array(load_image(live_face)), enforce_detection=False)
+                st.session_state.face_distance = float(res.get("distance", 0.0))
+                st.session_state.face_verified = bool(res.get("verified", False))
+                st.write(f"Distance: {st.session_state.face_distance:.4f}")
+                if st.session_state.face_verified:
+                    st.success("Face match verified.")
+                else:
+                    st.error("Face mismatch.")
+            except Exception as e:
+                st.error(f"Face verification error: {e}")
+
+# ---- TRANSACTIONS ----
+with tabs[5]:
+    st.header("💸 Transaction Fraud Detection")
+    txn = st.file_uploader("Upload transactions CSV (must include 'amount' column)", type=["csv"], key="txn")
+    if st.button("Analyze Transactions"):
+        if not txn:
+            st.error("Upload CSV.")
+        else:
+            try:
+                df = pd.read_csv(txn)
+                st.write(df.head())
+                if "amount" not in df.columns:
+                    st.warning("CSV must have 'amount' column.")
+                else:
+                    threshold = df["amount"].mean() + 3 * df["amount"].std()
+                    frauds = df[df["amount"] > threshold]
+                    st.session_state.transaction_frauds_count = len(frauds)
+                    st.metric("Potential Fraud Transactions", len(frauds))
+                    if not frauds.empty:
+                        st.dataframe(frauds)
+            except Exception as e:
+                st.error(f"CSV read error: {e}")
+
+# ---- PDF REPORT ----
+st.markdown("---")
+st.header("🧾 Generate Final Fraud Detection Report (PDF)")
+cust_name = st.text_input("Customer name (for report)", "")
+ref = st.text_input("Account / Reference number", "")
+remarks = st.text_area("Additional remarks", height=80)
+
+if st.button("Generate PDF Report"):
+    tmpd = tempfile.mkdtemp()
+    out_pdf = os.path.join(tmpd, f"fraud_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+    data = {
+        "customer_name": cust_name,
+        "reference": ref,
+        "forgery_score": st.session_state.forgery_score,
+        "signature_score": st.session_state.signature_score,
+        "aadhaar_text": st.session_state.aadhaar_text,
+        "pan_text": st.session_state.pan_text,
+        "face_distance": st.session_state.face_distance,
+        "face_verified": st.session_state.face_verified,
+        "transaction_frauds_count": st.session_state.transaction_frauds_count,
+        "remarks": remarks,
+    }
+    try:
+        generate_report_pdf(out_pdf, data)
+        with open(out_pdf, "rb") as f:
+            st.download_button("📥 Download Fraud Report (PDF)", data=f, file_name=os.path.basename(out_pdf), mime="application/pdf")
+    except Exception as e:
+        st.error(f"PDF generation error: {e}")
